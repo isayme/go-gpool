@@ -127,6 +127,69 @@ func (p *Pool[T]) deleteConn(c *conn[T]) {
 	delete(p.conns, valueID(c.value))
 }
 
+func (p *Pool[T]) Put(value T) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		return
+	}
+
+	id := valueID(value)
+	c := p.conns[id]
+	if c == nil {
+		c = &conn[T]{
+			value:      value,
+			createdAt:  time.Now(),
+			lastUsedAt: time.Now(),
+		}
+		p.conns[id] = c
+	}
+
+	c.lastUsedAt = time.Now()
+	p.idle = append(p.idle, c)
+	p.wakeWaiters()
+
+	if p.config.MaxIdle > 0 && len(p.idle) > p.config.MaxIdle {
+		for len(p.idle) > p.config.MaxIdle {
+			c := p.idle[0]
+			p.idle = p.idle[1:]
+			p.deleteConn(c)
+		}
+	}
+
+	if p.config.HealthCheck != nil {
+		if c.checkQueued.CompareAndSwap(false, true) {
+			go p.runAsyncHealthCheck(c)
+		}
+	}
+}
+
+func (p *Pool[T]) runAsyncHealthCheck(c *conn[T]) {
+	p.mu.Lock()
+	if time.Since(c.lastChecked) < p.config.HealthCheckInterval {
+		c.checkQueued.Store(false)
+		p.mu.Unlock()
+		return
+	}
+	p.mu.Unlock()
+
+	ok := p.config.HealthCheck(context.Background(), c.value)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !ok {
+		for i, ic := range p.idle {
+			if ic == c {
+				p.idle = append(p.idle[:i], p.idle[i+1:]...)
+				p.deleteConn(c)
+				break
+			}
+		}
+	}
+	c.checkQueued.Store(false)
+}
+
 func (p *Pool[T]) wakeWaiters() {
 	select {
 	case <-p.wait:
