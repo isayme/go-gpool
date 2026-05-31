@@ -125,6 +125,7 @@ func (p *Pool[T]) createConn(ctx context.Context) (*conn[T], error) {
 
 func (p *Pool[T]) deleteConn(c *conn[T]) {
 	delete(p.conns, valueID(c.value))
+	p.total--
 }
 
 func (p *Pool[T]) Put(value T) {
@@ -172,22 +173,41 @@ func (p *Pool[T]) runAsyncHealthCheck(c *conn[T]) {
 		p.mu.Unlock()
 		return
 	}
+	// Skip if connection is no longer idle (already borrowed)
+	if !p.isIdle(c) {
+		c.checkQueued.Store(false)
+		p.mu.Unlock()
+		return
+	}
 	p.mu.Unlock()
 
 	ok := p.config.HealthCheck(context.Background(), c.value)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !ok {
-		for i, ic := range p.idle {
-			if ic == c {
-				p.idle = append(p.idle[:i], p.idle[i+1:]...)
-				p.deleteConn(c)
-				break
-			}
-		}
+	if !ok && p.isIdle(c) {
+		p.removeFromIdle(c)
+		p.deleteConn(c)
 	}
 	c.checkQueued.Store(false)
+}
+
+func (p *Pool[T]) isIdle(c *conn[T]) bool {
+	for _, ic := range p.idle {
+		if ic == c {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *Pool[T]) removeFromIdle(c *conn[T]) {
+	for i, ic := range p.idle {
+		if ic == c {
+			p.idle = append(p.idle[:i], p.idle[i+1:]...)
+			break
+		}
+	}
 }
 
 func (p *Pool[T]) wakeWaiters() {
