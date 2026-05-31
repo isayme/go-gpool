@@ -73,3 +73,107 @@ func valueID[T any](v T) uintptr {
 	}
 	return 0
 }
+
+func (p *Pool[T]) getFromIdle(ctx context.Context) *conn[T] {
+	for len(p.idle) > 0 {
+		c := p.idle[len(p.idle)-1]
+		p.idle = p.idle[:len(p.idle)-1]
+		c.checkQueued.Store(false)
+
+		if p.config.MaxLifetime > 0 && time.Since(c.createdAt) > p.config.MaxLifetime {
+			p.deleteConn(c)
+			continue
+		}
+		if p.config.IdleTimeout > 0 && time.Since(c.lastUsedAt) > p.config.IdleTimeout {
+			p.deleteConn(c)
+			continue
+		}
+
+		if p.config.HealthCheck != nil {
+			p.mu.Unlock()
+			ok := p.config.HealthCheck(ctx, c.value)
+			p.mu.Lock()
+			if !ok {
+				p.deleteConn(c)
+				continue
+			}
+			c.lastChecked = time.Now()
+		}
+
+		c.lastUsedAt = time.Now()
+		return c
+	}
+	return nil
+}
+
+func (p *Pool[T]) createConn(ctx context.Context) (*conn[T], error) {
+	v, err := p.config.Factory(ctx)
+	if err != nil {
+		return nil, err
+	}
+	c := &conn[T]{
+		value:      v,
+		createdAt:  time.Now(),
+		lastUsedAt: time.Now(),
+	}
+	if p.config.HealthCheck != nil {
+		c.lastChecked = time.Now()
+	}
+	p.conns[valueID(v)] = c
+	return c, nil
+}
+
+func (p *Pool[T]) deleteConn(c *conn[T]) {
+	delete(p.conns, valueID(c.value))
+}
+
+func (p *Pool[T]) Get(ctx context.Context) (T, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		var zero T
+		return zero, ErrPoolClosed
+	}
+
+	for {
+		if c := p.getFromIdle(ctx); c != nil {
+			return c.value, nil
+		}
+
+		if p.config.MaxTotal == 0 || p.total < p.config.MaxTotal {
+			p.total++
+			p.mu.Unlock()
+			c, err := p.createConn(ctx)
+			p.mu.Lock()
+			if err != nil {
+				p.total--
+				var zero T
+				return zero, err
+			}
+			return c.value, nil
+		}
+
+		done := make(chan struct{})
+		go func() {
+			p.cond.Wait()
+			close(done)
+		}()
+		p.mu.Unlock()
+
+		select {
+		case <-done:
+			p.mu.Lock()
+			continue
+		case <-ctx.Done():
+			go func() {
+				p.mu.Lock()
+				p.cond.Broadcast()
+				p.mu.Unlock()
+			}()
+			p.mu.Lock()
+			var zero T
+			return zero, ctx.Err()
+		}
+	}
+}
