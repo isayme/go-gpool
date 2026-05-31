@@ -3,6 +3,7 @@ package gpool
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"time"
 )
@@ -61,4 +62,14 @@ func New[T any](config Config[T]) (*Pool[T], error) {
 
 func (p *Pool[T]) backgroundLoop() {
 	// Will be implemented in a later task
+}
+
+// valueID returns a stable identifier for a value to track its conn[T] wrapper.
+// Works for pointer and interface types (the common case for connections).
+func valueID[T any](v T) uintptr {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Pointer || rv.Kind() == reflect.Interface {
+		return rv.Pointer()
+	}
+	return 0
 }
