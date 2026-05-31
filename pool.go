@@ -444,12 +444,12 @@ func (p *Pool[T]) Get(ctx context.Context) (T, error) {
 		select {
 		case <-wait:
 			p.mu.Lock()
+			if p.closed {
+				var zero T
+				return zero, ErrPoolClosed
+			}
 			continue
 		case <-ctx.Done():
-			// Wake all waiters so they can re-check the condition or
-			// discover the pool is closed. A dedicated wake per waiter
-			// would be more precise but this thundering-herd pattern
-			// is simple and safe.
 			p.mu.Lock()
 			close(p.wait)
 			p.wait = make(chan struct{})
