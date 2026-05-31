@@ -61,7 +61,89 @@ func New[T any](config Config[T]) (*Pool[T], error) {
 }
 
 func (p *Pool[T]) backgroundLoop() {
-	// Will be implemented in a later task
+	ticker := time.NewTicker(p.config.BackgroundInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-p.stopCh:
+			return
+		case <-ticker.C:
+			p.maintenance()
+		}
+	}
+}
+
+func (p *Pool[T]) maintenance() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		return
+	}
+
+	now := time.Now()
+
+	// Evict expired and unhealthy idle connections
+	valid := p.idle[:0]
+	for _, c := range p.idle {
+		if p.config.MaxLifetime > 0 && now.Sub(c.createdAt) > p.config.MaxLifetime {
+			p.deleteConn(c)
+			continue
+		}
+		if p.config.IdleTimeout > 0 && now.Sub(c.lastUsedAt) > p.config.IdleTimeout {
+			p.deleteConn(c)
+			continue
+		}
+		if p.config.HealthCheck != nil && p.config.HealthCheckInterval > 0 && now.Sub(c.lastChecked) >= p.config.HealthCheckInterval {
+			p.mu.Unlock()
+			ok := p.config.HealthCheck(context.Background(), c.value)
+			p.mu.Lock()
+			if !ok {
+				p.deleteConn(c)
+				continue
+			}
+			c.lastChecked = now
+		}
+		valid = append(valid, c)
+	}
+	p.idle = valid
+
+	// Replenish to MinIdle
+	for len(p.idle) < p.config.MinIdle && (p.config.MaxTotal == 0 || p.total < p.config.MaxTotal) {
+		p.total++
+		p.mu.Unlock()
+		c, err := p.createConn(context.Background())
+		p.mu.Lock()
+		if err != nil {
+			p.total--
+			break
+		}
+		p.idle = append(p.idle, c)
+	}
+
+	// Trim to MaxIdle
+	if p.config.MaxIdle > 0 && len(p.idle) > p.config.MaxIdle {
+		for len(p.idle) > p.config.MaxIdle {
+			c := p.idle[0]
+			p.idle = p.idle[1:]
+			p.deleteConn(c)
+		}
+	}
+}
+
+func (p *Pool[T]) Close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		return
+	}
+	p.closed = true
+	p.idle = nil
+	p.conns = nil
+	p.wakeWaiters()
+	close(p.stopCh)
 }
 
 // valueID returns a stable identifier for a value to track its conn[T] wrapper.
