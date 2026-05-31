@@ -27,13 +27,13 @@ type Config[T any] struct {
 
 type Pool[T any] struct {
 	mu     sync.Mutex
-	cond   *sync.Cond
 	closed bool
 	idle   []*conn[T]
 	total  int
 	config Config[T]
 	stopCh chan struct{}
 	conns  map[uintptr]*conn[T]
+	wait   chan struct{}
 }
 
 func New[T any](config Config[T]) (*Pool[T], error) {
@@ -54,8 +54,8 @@ func New[T any](config Config[T]) (*Pool[T], error) {
 		config: config,
 		stopCh: make(chan struct{}),
 		conns:  make(map[uintptr]*conn[T]),
+		wait:   make(chan struct{}),
 	}
-	p.cond = sync.NewCond(&p.mu)
 	go p.backgroundLoop()
 	return p, nil
 }
@@ -127,6 +127,15 @@ func (p *Pool[T]) deleteConn(c *conn[T]) {
 	delete(p.conns, valueID(c.value))
 }
 
+func (p *Pool[T]) wakeWaiters() {
+	select {
+	case <-p.wait:
+	default:
+		close(p.wait)
+		p.wait = make(chan struct{})
+	}
+}
+
 func (p *Pool[T]) Get(ctx context.Context) (T, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -154,24 +163,18 @@ func (p *Pool[T]) Get(ctx context.Context) (T, error) {
 			return c.value, nil
 		}
 
-		done := make(chan struct{})
-		go func() {
-			p.cond.Wait()
-			close(done)
-		}()
+		// Create a new wait channel for this round
+		wait := p.wait
 		p.mu.Unlock()
 
 		select {
-		case <-done:
+		case <-wait:
 			p.mu.Lock()
 			continue
 		case <-ctx.Done():
-			go func() {
-				p.mu.Lock()
-				p.cond.Broadcast()
-				p.mu.Unlock()
-			}()
 			p.mu.Lock()
+			close(p.wait)
+			p.wait = make(chan struct{})
 			var zero T
 			return zero, ctx.Err()
 		}
