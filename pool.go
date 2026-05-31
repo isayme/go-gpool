@@ -77,10 +77,9 @@ type Config[T any] struct {
 	// should respect ctx.Done() and return promptly.
 	Factory func(ctx context.Context) (T, error)
 
-	// HealthCheck validates a connection before it is lent out (synchronous,
-	// inside Get) and optionally after return (asynchronous, inside Put).
-	// Return true if the connection is healthy. If nil, no health checks
-	// are performed.
+	// HealthCheck validates a connection after it is returned via Put
+	// (asynchronous, debounced). Failed checks discard the connection.
+	// If nil, no health checks are performed.
 	HealthCheck func(ctx context.Context, conn T) bool
 }
 
@@ -230,16 +229,14 @@ func valueID[T any](v T) uintptr {
 }
 
 // getFromIdle pops the most recently returned connection from the idle stack
-// (LIFO, favouring hot connections), checks expiry and health, and returns it.
+// (LIFO, favouring hot connections), checks expiry, and returns it.
 // Returns nil if the stack is empty or all entries have been discarded.
 //
-// The mutex must be held when calling this method; it may temporarily
-// release the mutex during the HealthCheck callback.
-func (p *Pool[T]) getFromIdle(ctx context.Context) *conn[T] {
+// The mutex must be held when calling this method.
+func (p *Pool[T]) getFromIdle() *conn[T] {
 	for len(p.idle) > 0 {
 		c := p.idle[len(p.idle)-1]
 		p.idle = p.idle[:len(p.idle)-1]
-		// Clear the health-check flag so Put can schedule a fresh one later.
 		c.checkQueued.Store(false)
 
 		if p.config.MaxLifetime > 0 && time.Since(c.createdAt) > p.config.MaxLifetime {
@@ -249,17 +246,6 @@ func (p *Pool[T]) getFromIdle(ctx context.Context) *conn[T] {
 		if p.config.IdleTimeout > 0 && time.Since(c.lastUsedAt) > p.config.IdleTimeout {
 			p.deleteConn(c)
 			continue
-		}
-
-		if p.config.HealthCheck != nil {
-			p.mu.Unlock()
-			ok := p.config.HealthCheck(ctx, c.value)
-			p.mu.Lock()
-			if !ok {
-				p.deleteConn(c)
-				continue
-			}
-			c.lastChecked = time.Now()
 		}
 
 		c.lastUsedAt = time.Now()
@@ -351,11 +337,6 @@ func (p *Pool[T]) Put(value T) {
 // idle (has not been lent out in the meantime).
 func (p *Pool[T]) runAsyncHealthCheck(c *conn[T]) {
 	p.mu.Lock()
-	if time.Since(c.lastChecked) < p.config.HealthCheckInterval {
-		c.checkQueued.Store(false)
-		p.mu.Unlock()
-		return
-	}
 	if !p.isIdle(c) {
 		c.checkQueued.Store(false)
 		p.mu.Unlock()
@@ -431,7 +412,7 @@ func (p *Pool[T]) Get(ctx context.Context) (T, error) {
 	}
 
 	for {
-		if c := p.getFromIdle(ctx); c != nil {
+		if c := p.getFromIdle(); c != nil {
 			return c.value, nil
 		}
 

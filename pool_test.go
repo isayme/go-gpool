@@ -181,7 +181,8 @@ func TestHealthCheckDiscardsBadConnections(t *testing.T) {
 	conn.id = 1
 	pool.Put(conn)
 
-	time.Sleep(10 * time.Millisecond)
+	// The health check runs asynchronously and removes the bad connection.
+	time.Sleep(50 * time.Millisecond)
 
 	conn2, _ := pool.Get(context.Background())
 	if conn2.id == 1 {
