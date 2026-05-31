@@ -1,6 +1,7 @@
 # gpool
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/isayme/go-gpool.svg)](https://pkg.go.dev/github.com/isayme/go-gpool)
+[![Coverage Status](https://coveralls.io/repos/github/isaymego-gpool/badge.svg?branch=master)](https://coveralls.io/github/isaymego-gpool?branch=master)
 
 Generic connection pool for Go. Uses Go 1.18+ generics for type-safe connection management.
 
