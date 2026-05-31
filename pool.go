@@ -99,6 +99,10 @@ func (p *Pool[T]) maintenance() {
 			p.mu.Unlock()
 			ok := p.config.HealthCheck(context.Background(), c.value)
 			p.mu.Lock()
+			if p.closed {
+				p.deleteConn(c)
+				continue
+			}
 			if !ok {
 				p.deleteConn(c)
 				continue
@@ -116,6 +120,10 @@ func (p *Pool[T]) maintenance() {
 		c, err := p.createConn(context.Background())
 		p.mu.Lock()
 		if err != nil {
+			p.total--
+			break
+		}
+		if p.closed {
 			p.total--
 			break
 		}
@@ -227,6 +235,7 @@ func (p *Pool[T]) Put(value T) {
 			lastUsedAt: time.Now(),
 		}
 		p.conns[id] = c
+		p.total++
 	}
 
 	c.lastUsedAt = time.Now()
@@ -324,6 +333,11 @@ func (p *Pool[T]) Get(ctx context.Context) (T, error) {
 				p.total--
 				var zero T
 				return zero, err
+			}
+			if p.closed {
+				p.total--
+				var zero T
+				return zero, ErrPoolClosed
 			}
 			return c.value, nil
 		}
