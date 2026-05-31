@@ -9,8 +9,7 @@ import (
 )
 
 var (
-	ErrPoolClosed    = errors.New("gpool: pool is closed")
-	ErrFactoryFailed = errors.New("gpool: factory failed")
+	ErrPoolClosed = errors.New("gpool: pool is closed")
 )
 
 type Config[T any] struct {
@@ -40,9 +39,7 @@ func New[T any](config Config[T]) (*Pool[T], error) {
 	if config.Factory == nil {
 		return nil, errors.New("gpool: Factory is required")
 	}
-	if config.MaxTotal == 0 {
-		config.MaxTotal = 100
-	}
+
 	if config.BackgroundInterval == 0 {
 		config.BackgroundInterval = config.HealthCheckInterval
 	}
@@ -84,7 +81,7 @@ func (p *Pool[T]) maintenance() {
 
 	now := time.Now()
 
-	// Evict expired and unhealthy idle connections
+	// Evict expired idle connections
 	valid := p.idle[:0]
 	for _, c := range p.idle {
 		if p.config.MaxLifetime > 0 && now.Sub(c.createdAt) > p.config.MaxLifetime {
@@ -94,20 +91,6 @@ func (p *Pool[T]) maintenance() {
 		if p.config.IdleTimeout > 0 && now.Sub(c.lastUsedAt) > p.config.IdleTimeout {
 			p.deleteConn(c)
 			continue
-		}
-		if p.config.HealthCheck != nil && p.config.HealthCheckInterval > 0 && now.Sub(c.lastChecked) >= p.config.HealthCheckInterval {
-			p.mu.Unlock()
-			ok := p.config.HealthCheck(context.Background(), c.value)
-			p.mu.Lock()
-			if p.closed {
-				p.deleteConn(c)
-				continue
-			}
-			if !ok {
-				p.deleteConn(c)
-				continue
-			}
-			c.lastChecked = now
 		}
 		valid = append(valid, c)
 	}
@@ -123,6 +106,7 @@ func (p *Pool[T]) maintenance() {
 			p.total--
 			break
 		}
+		p.conns[valueID(c.value)] = c
 		if p.closed {
 			p.total--
 			break
@@ -209,7 +193,6 @@ func (p *Pool[T]) createConn(ctx context.Context) (*conn[T], error) {
 	if p.config.HealthCheck != nil {
 		c.lastChecked = time.Now()
 	}
-	p.conns[valueID(v)] = c
 	return c, nil
 }
 
@@ -334,6 +317,7 @@ func (p *Pool[T]) Get(ctx context.Context) (T, error) {
 				var zero T
 				return zero, err
 			}
+			p.conns[valueID(c.value)] = c
 			if p.closed {
 				p.total--
 				var zero T
